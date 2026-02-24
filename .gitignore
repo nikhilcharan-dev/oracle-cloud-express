@@ -1,0 +1,11 @@
+.idea
+.oci/
+node_modules
+
+.env
+configuration.js
+package-lock.json
+test.html
+*.pem
+.oci/key.pem
+/.oci

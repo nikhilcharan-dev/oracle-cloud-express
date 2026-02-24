@@ -1,0 +1,30 @@
+{
+  "name": "oracle-cloud-express-for-object-storage",
+  "version": "1.0.0",
+  "description": "",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js",
+    "test": "nodemon app.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nikhilcharan-dev/oracle-cloud-express.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/nikhilcharan-dev/oracle-cloud-express/issues"
+  },
+  "homepage": "https://github.com/nikhilcharan-dev/oracle-cloud-express#readme",
+  "dependencies": {
+    "cors": "^2.8.6",
+    "dotenv": "^17.3.1",
+    "express": "^5.2.1",
+    "morgan": "^1.10.1",
+    "multer": "^2.0.2",
+    "oci-sdk": "^2.125.2"
+  }
+}
