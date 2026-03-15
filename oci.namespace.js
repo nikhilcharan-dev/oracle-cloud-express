@@ -1,13 +1,13 @@
-let namespaceName = null;
-
 import client from "./oci.client.js";
+import logger from "./logger.js";
+
+let namespaceName = null;
 
 export async function getNamespace() {
     if (!namespaceName) {
         const response = await client.getNamespace({});
         namespaceName = response.value;
-        console.log("[Namespace] initialized:", namespaceName);
+        logger.info({ namespace: namespaceName }, "Namespace initialized");
     }
-
     return namespaceName;
 }

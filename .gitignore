@@ -1,11 +1,11 @@
-.idea
+.idea/
 .oci/
-node_modules
+node_modules/
+uploads/
+data/
 
 .env
-configuration.js
-package-lock.json
-test.html
 *.pem
-.oci/key.pem
-/.oci
+configuration.js
+api_spec.json
+Architecture_Scalability_Deployment.md

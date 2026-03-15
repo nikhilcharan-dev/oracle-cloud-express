@@ -1,129 +1,172 @@
 import { Router } from "express";
 import multer from "multer";
-import fs from "fs";
+import fs from "fs/promises";
 import { Readable } from "stream";
+import contentDisposition from "content-disposition";
 
 import client from "../oci.client.js";
 import { getNamespace } from "../oci.namespace.js";
+import logger from "../logger.js";
+import { validateBucketName, validateObjectName } from "../middleware/validate.js";
 
 const router = Router();
-const upload = multer({ dest: "uploads/" });
+
+const MAX_FILE_SIZE = parseInt(process.env.MAX_FILE_SIZE_MB || "50", 10) * 1024 * 1024;
+
+const ALLOWED_MIME_TYPES = process.env.ALLOWED_MIME_TYPES
+    ? process.env.ALLOWED_MIME_TYPES.split(",")
+    : null; // null = allow all
+
+const upload = multer({
+    dest: "uploads/",
+    limits: { fileSize: MAX_FILE_SIZE },
+    fileFilter: (_req, file, cb) => {
+        if (ALLOWED_MIME_TYPES && !ALLOWED_MIME_TYPES.includes(file.mimetype)) {
+            return cb(new Error(`File type ${file.mimetype} not allowed`));
+        }
+        cb(null, true);
+    },
+});
 
 const compartmentId = process.env.COMPARTMENT_ID;
 
 // ============ LIST ALL BUCKETS ============
-router.get("/buckets", async (req, res) => {
+router.get("/buckets", async (req, res, next) => {
     try {
         const namespaceName = await getNamespace();
 
         const response = await client.listBuckets({
             namespaceName,
-            compartmentId
+            compartmentId,
         });
 
         res.json(response.items);
     } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: "Failed to list buckets" });
+        next(err);
     }
 });
 
 // ============ LIST OBJECTS ============
-router.get("/objects/:bucketName", async (req, res) => {
+router.get("/objects/:bucketName", validateBucketName, async (req, res, next) => {
     try {
         const namespaceName = await getNamespace();
         const { bucketName } = req.params;
 
         const response = await client.listObjects({
             namespaceName,
-            bucketName
+            bucketName,
         });
 
         res.json(response.listObjects.objects);
     } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: "Failed to list objects" });
+        next(err);
     }
 });
 
 // ============ UPLOAD FILE ============
-router.post("/upload/:bucketName", upload.single("file"), async (req, res) => {
-    try {
-        const namespaceName = await getNamespace();
-        const { bucketName } = req.params;
+router.post(
+    "/upload/:bucketName",
+    validateBucketName,
+    upload.single("file"),
+    async (req, res, next) => {
+        let tempPath = null;
+        try {
+            if (!req.file) {
+                return res.status(400).json({ error: "No file uploaded" });
+            }
 
-        if (!req.file) {
-            return res.status(400).json({ error: "No file uploaded" });
+            tempPath = req.file.path;
+            const namespaceName = await getNamespace();
+            const { bucketName } = req.params;
+
+            // Sanitize the original filename — strip path components
+            const safeName = req.file.originalname.replace(/[^a-zA-Z0-9._\-]/g, "_");
+
+            const stream = (await fs.open(tempPath, "r")).createReadStream();
+
+            await client.putObject({
+                namespaceName,
+                bucketName,
+                objectName: safeName,
+                putObjectBody: stream,
+            });
+
+            logger.info({ bucket: bucketName, object: safeName }, "File uploaded");
+            res.json({ message: "File uploaded successfully", objectName: safeName });
+        } catch (err) {
+            next(err);
+        } finally {
+            if (tempPath) {
+                await fs.unlink(tempPath).catch((unlinkErr) => {
+                    logger.warn({ path: tempPath, err: unlinkErr }, "Failed to clean up temp file");
+                });
+            }
         }
-
-        const fileStream = fs.createReadStream(req.file.path);
-
-        await client.putObject({
-            namespaceName,
-            bucketName,
-            objectName: req.file.originalname,
-            putObjectBody: fileStream
-        });
-
-        fs.unlinkSync(req.file.path);
-
-        res.json({ message: "File uploaded successfully" });
-
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: "Upload failed" });
     }
-});
+);
 
 // ============ DOWNLOAD FILE ============
-router.get("/download/:bucketName/:objectName", async (req, res) => {
-    try {
-        const namespaceName = await getNamespace();
-        const { bucketName, objectName } = req.params;
+router.get(
+    "/download/:bucketName/:objectName",
+    validateBucketName,
+    validateObjectName,
+    async (req, res, next) => {
+        try {
+            const namespaceName = await getNamespace();
+            const { bucketName, objectName } = req.params;
 
-        const response = await client.getObject({
-            namespaceName,
-            bucketName,
-            objectName
-        });
+            const response = await client.getObject({
+                namespaceName,
+                bucketName,
+                objectName,
+            });
 
-        res.setHeader(
-            "Content-Disposition",
-            `attachment; filename="${objectName}"`
-        );
+            res.setHeader("Content-Disposition", contentDisposition(objectName));
+            res.setHeader(
+                "Content-Type",
+                response.contentType || "application/octet-stream"
+            );
 
-        res.setHeader(
-            "Content-Type",
-            response.contentType || "application/octet-stream"
-        );
+            const nodeStream = Readable.fromWeb(response.value);
 
-        const nodeStream = Readable.fromWeb(response.value);
-        nodeStream.pipe(res);
+            nodeStream.on("error", (err) => {
+                logger.error({ err, bucket: bucketName, object: objectName }, "Stream error during download");
+                if (!res.headersSent) {
+                    res.status(500).json({ error: "Download stream failed" });
+                } else {
+                    res.destroy();
+                }
+            });
 
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: "Download failed" });
+            nodeStream.pipe(res);
+        } catch (err) {
+            next(err);
+        }
     }
-});
+);
 
 // ============ DELETE OBJECT ============
-router.delete("/object/:bucketName/:objectName", async (req, res) => {
-    try {
-        const namespaceName = await getNamespace();
-        const { bucketName, objectName } = req.params;
+router.delete(
+    "/object/:bucketName/:objectName",
+    validateBucketName,
+    validateObjectName,
+    async (req, res, next) => {
+        try {
+            const namespaceName = await getNamespace();
+            const { bucketName, objectName } = req.params;
 
-        await client.deleteObject({
-            namespaceName,
-            bucketName,
-            objectName
-        });
+            await client.deleteObject({
+                namespaceName,
+                bucketName,
+                objectName,
+            });
 
-        res.json({ message: "Object deleted successfully" });
-
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: "Delete failed" });
+            logger.info({ bucket: bucketName, object: objectName }, "Object deleted");
+            res.json({ message: "Object deleted successfully" });
+        } catch (err) {
+            next(err);
+        }
     }
-});
+);
 
 export default router;

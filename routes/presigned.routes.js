@@ -1,22 +1,29 @@
 import { Router } from "express";
 import client from "../oci.client.js";
 import { getNamespace } from "../oci.namespace.js";
+import logger from "../logger.js";
+import { validateBucketName, validateObjectName, validateObjectNameBody } from "../middleware/validate.js";
 
 const router = Router();
 
-// Upload Pre-Signed URL
-router.post("/upload/:bucketName", async (req, res) => {
+const DEFAULT_EXPIRY_MINUTES = parseInt(process.env.PRESIGNED_EXPIRY_MINUTES || "15", 10);
+
+function getExpiresAt(minutes) {
+    return new Date(Date.now() + minutes * 60 * 1000);
+}
+
+function buildOciUrl(region, accessUri) {
+    return `https://objectstorage.${region}.oraclecloud.com${accessUri}`;
+}
+
+// ============ UPLOAD PRE-SIGNED URL ============
+router.post("/upload/:bucketName", validateBucketName, validateObjectNameBody, async (req, res, next) => {
     try {
         const namespaceName = await getNamespace();
-
         const { bucketName } = req.params;
         const { objectName } = req.body;
 
-        if (!objectName) {
-            return res.status(400).json({ error: "objectName required" });
-        }
-
-        const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+        const expiresAt = getExpiresAt(DEFAULT_EXPIRY_MINUTES);
 
         const response = await client.createPreauthenticatedRequest({
             namespaceName,
@@ -25,52 +32,52 @@ router.post("/upload/:bucketName", async (req, res) => {
                 name: `upload-${objectName}-${Date.now()}`,
                 accessType: "ObjectWrite",
                 objectName,
-                timeExpires: expiresAt
-            }
+                timeExpires: expiresAt,
+            },
         });
 
         const region = process.env.REGION;
+        const uploadUrl = buildOciUrl(region, response.preauthenticatedRequest.accessUri);
 
-        const uploadUrl = `https://objectstorage.${region}.oraclecloud.com${response.preauthenticatedRequest.accessUri}`;
-        console.log(`uploadUrl: ${uploadUrl}`);
-        res.json({ uploadUrl });
-
+        logger.info({ bucket: bucketName, object: objectName }, "Upload pre-signed URL generated");
+        res.json({ uploadUrl, expiresAt });
     } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: "Failed to generate upload URL" });
+        next(err);
     }
 });
 
-// Download Pre-Signed URL
-router.get("/download/:bucketName/:objectName", async (req, res) => {
-    try {
-        const namespaceName = await getNamespace();
+// ============ DOWNLOAD PRE-SIGNED URL ============
+router.get(
+    "/download/:bucketName/:objectName",
+    validateBucketName,
+    validateObjectName,
+    async (req, res, next) => {
+        try {
+            const namespaceName = await getNamespace();
+            const { bucketName, objectName } = req.params;
 
-        const { bucketName, objectName } = req.params;
+            const expiresAt = getExpiresAt(DEFAULT_EXPIRY_MINUTES);
 
-        const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+            const response = await client.createPreauthenticatedRequest({
+                namespaceName,
+                bucketName,
+                createPreauthenticatedRequestDetails: {
+                    name: `download-${objectName}-${Date.now()}`,
+                    accessType: "ObjectRead",
+                    objectName,
+                    timeExpires: expiresAt,
+                },
+            });
 
-        const response = await client.createPreauthenticatedRequest({
-            namespaceName,
-            bucketName,
-            createPreauthenticatedRequestDetails: {
-                name: `download-${objectName}-${Date.now()}`,
-                accessType: "ObjectRead",
-                objectName,
-                timeExpires: expiresAt
-            }
-        });
+            const region = process.env.REGION;
+            const downloadUrl = buildOciUrl(region, response.preauthenticatedRequest.accessUri);
 
-        const region = client.regionId;
-
-        const downloadUrl = `https://objectstorage.${region}.oraclecloud.com${response.preauthenticatedRequest.accessUri}`;
-
-        res.json({ downloadUrl });
-
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: "Failed to generate download URL" });
+            logger.info({ bucket: bucketName, object: objectName }, "Download pre-signed URL generated");
+            res.json({ downloadUrl, expiresAt });
+        } catch (err) {
+            next(err);
+        }
     }
-});
+);
 
 export default router;
